@@ -1,6 +1,25 @@
 # OpenCode Memory System
 
-Persistent memory system for OpenCode AI coding agent. Provides 17 custom tools for memory management with auto-tagging, duplicate/conflict detection, and structured metadata.
+Persistent memory system for OpenCode AI coding agent. Provides 22 custom tools for memory management with auto-tagging, duplicate/conflict detection, structured metadata, and self-improvement capabilities.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenCode Agent                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │ Memory Sys  │  │ Learning Sys│  │ HTTP API Server     │ │
+│  │ (17 tools)  │  │ (5 tools)   │  │ (REST endpoints)    │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│         │                │                    │              │
+│         ▼                ▼                    ▼              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Markdown Files                         │   │
+│  │  MEMORY.md | checkpoint.md | notes.md | tasks/     │   │
+│  │  corrections.md | patterns.md | learnings.md       │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Features
 
@@ -167,6 +186,65 @@ memory_stats
 ```
 memory_export_json file="backup.json"
 memory_import_json file="backup.json"
+```
+
+### Learning from corrections
+
+```javascript
+// Auto-learn when you edit code
+// (happens automatically via plugin)
+
+// Manual learning
+memory_learn type="correction" wrong="var x = 1" correct="const x = 1" context="JavaScript"
+memory_learn type="insight" content="Always use early returns" context="Code style"
+memory_learn type="preference" content="Prefer functional over OOP" context="Architecture"
+```
+
+### Pattern management
+
+```javascript
+// List all patterns
+memory_patterns action="list"
+
+// Add a new pattern
+memory_patterns action="add" name="Early Return" description="Use early returns for cleaner code" tags="style,clean-code"
+
+// Search patterns
+memory_patterns action="search" query="react hooks"
+
+// Use a pattern (increments count)
+memory_patterns action="use" id="abc123"
+```
+
+### Apply learnings
+
+```javascript
+// Apply learned corrections and patterns to current context
+memory_apply_learnings context="React component with API calls"
+```
+
+### HTTP API
+
+```bash
+# Start server
+npm start
+
+# Health check
+curl http://localhost:3000/api/health
+
+# Read memory
+curl http://localhost:3000/api/memory?file=MEMORY.md
+
+# Search
+curl "http://localhost:3000/api/memory/search?q=flutter&type=feature"
+
+# Write
+curl -X POST http://localhost:3000/api/memory/write \
+  -H "Content-Type: application/json" \
+  -d '{"content": "New entry", "type": "note"}'
+
+# Statistics
+curl http://localhost:3000/api/memory/stats
 ```
 
 ## Plugin Features

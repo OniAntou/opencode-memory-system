@@ -1,26 +1,47 @@
 import { tool } from "@opencode-ai/plugin"
 import fs from "fs/promises"
 import path from "path"
+import { 
+  readFileSafe, 
+  writeFileSafe, 
+  parseSections, 
+  rebuildMemoryFile,
+  parseMetadata,
+  metadataToComment,
+  extractTagsFromContent,
+  MemoryMetadata,
+  ParsedSection
+} from "./memory-utils"
 
 const MEMORY_DIR = ".opencode/memory"
 
-interface MemoryMetadata {
-  type: string
-  tags: string[]
-  importance: "low" | "medium" | "high"
-  updated: string
+// Cache for file reads
+interface CacheEntry {
+  content: string
+  timestamp: number
 }
 
-interface ParsedSection {
-  heading: string
-  metadata: MemoryMetadata | null
-  content: string
+const fileCache = new Map<string, CacheEntry>()
+const CACHE_TTL_MS = 5000 // 5 seconds
+
+function invalidateCache(filePath: string) {
+  fileCache.delete(filePath)
 }
 
 async function readMemoryFile(relativePath: string): Promise<string> {
   const fullPath = path.join(MEMORY_DIR, relativePath)
+  
+  // Check cache
+  const cached = fileCache.get(fullPath)
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.content
+  }
+  
   try {
-    return await fs.readFile(fullPath, "utf-8")
+    const content = await fs.readFile(fullPath, "utf-8")
+    // Update cache
+    fileCache.set(fullPath, { content, timestamp: Date.now() })
+    return content
   } catch {
     return ""
   }
@@ -30,66 +51,8 @@ async function writeMemoryFile(relativePath: string, content: string): Promise<v
   const fullPath = path.join(MEMORY_DIR, relativePath)
   await fs.mkdir(path.dirname(fullPath), { recursive: true })
   await fs.writeFile(fullPath, content, "utf-8")
-}
-
-function parseMetadata(comment: string): MemoryMetadata | null {
-  const match = comment.match(/<!--\s*type:\s*(.+?)\s*\|/) 
-  if (!match) return null
-
-  const type = match[1].trim()
-  const tagsMatch = comment.match(/tags:\s*(.+?)\s*\|/)
-  const importanceMatch = comment.match(/importance:\s*(low|medium|high)\s*\|/)
-  const updatedMatch = comment.match(/updated:\s*(.+?)\s*-->/)
-
-  return {
-    type,
-    tags: tagsMatch ? tagsMatch[1].split(",").map(t => t.trim()) : [],
-    importance: importanceMatch ? importanceMatch[1] as MemoryMetadata["importance"] : "medium",
-    updated: updatedMatch ? updatedMatch[1].trim() : new Date().toISOString().split("T")[0],
-  }
-}
-
-function metadataToComment(meta: MemoryMetadata): string {
-  return `<!-- type: ${meta.type} | tags: ${meta.tags.join(", ")} | importance: ${meta.importance} | updated: ${meta.updated} -->`
-}
-
-function parseSections(content: string): ParsedSection[] {
-  const sections: ParsedSection[] = []
-  const lines = content.split("\n")
-  let current: ParsedSection | null = null
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (line.startsWith("## ")) {
-      if (current) sections.push(current)
-      current = { heading: line, metadata: null, content: "" }
-    } else if (current) {
-      const metaMatch = line.match(/<!--\s*type:\s*.+?\s*-->/)
-      if (metaMatch && !current.metadata) {
-        current.metadata = parseMetadata(line)
-      } else {
-        current.content += line + "\n"
-      }
-    }
-  }
-  if (current) sections.push(current)
-
-  return sections
-}
-
-function rebuildMemoryFile(sections: ParsedSection[]): string {
-  const parts: string[] = ["# Project Memory"]
-
-  for (const section of sections) {
-    parts.push("")
-    parts.push(section.heading)
-    if (section.metadata) {
-      parts.push(metadataToComment(section.metadata))
-    }
-    parts.push(section.content.trim())
-  }
-
-  return parts.join("\n") + "\n"
+  // Invalidate cache
+  invalidateCache(fullPath)
 }
 
 function levenshteinDistance(a: string, b: string): number {

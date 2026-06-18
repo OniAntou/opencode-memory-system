@@ -6,6 +6,53 @@ import { URL } from 'url'
 const MEMORY_DIR = process.env.MEMORY_DIR || '.opencode/memory'
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const API_KEY = process.env.API_KEY || ''
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10) // 1 minute
+const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10)
+
+// Rate limiting
+interface RateLimitEntry {
+  count: number
+  resetTime: number
+}
+
+const rateLimitMap = new Map<string, RateLimitEntry>()
+
+function getRateLimitKey(req: http.IncomingMessage): string {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown'
+  return String(ip)
+}
+
+function checkRateLimit(req: http.IncomingMessage): boolean {
+  const key = getRateLimitKey(req)
+  const now = Date.now()
+  const entry = rateLimitMap.get(key)
+
+  if (!entry || now > entry.resetTime) {
+    rateLimitMap.set(key, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS })
+    return true
+  }
+
+  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
+    return false
+  }
+
+  entry.count++
+  return true
+}
+
+function getRateLimitHeaders(req: http.IncomingMessage): Record<string, string> {
+  const key = getRateLimitKey(req)
+  const entry = rateLimitMap.get(key)
+  const remaining = entry ? Math.max(0, RATE_LIMIT_MAX_REQUESTS - entry.count) : RATE_LIMIT_MAX_REQUESTS
+  const resetTime = entry ? entry.resetTime : Date.now() + RATE_LIMIT_WINDOW_MS
+
+  return {
+    'X-RateLimit-Limit': String(RATE_LIMIT_MAX_REQUESTS),
+    'X-RateLimit-Remaining': String(remaining),
+    'X-RateLimit-Reset': String(Math.ceil(resetTime / 1000)),
+  }
+}
 
 interface MemoryMetadata {
   type: string
@@ -117,13 +164,26 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const method = req.method || 'GET'
 
   // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN)
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  res.setHeader('Access-Control-Max-Age', '86400') // 24 hours
+
+  // Rate limiting headers
+  const rateLimitHeaders = getRateLimitHeaders(req)
+  for (const [key, value] of Object.entries(rateLimitHeaders)) {
+    res.setHeader(key, value)
+  }
 
   if (method === 'OPTIONS') {
     res.writeHead(204)
     res.end()
+    return
+  }
+
+  // Check rate limit
+  if (!checkRateLimit(req)) {
+    jsonResponse(res, 429, { error: 'Too many requests. Please try again later.' })
     return
   }
 
@@ -140,6 +200,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     // GET /api/memory - Read memory file
     if (method === 'GET' && pathname === '/api/memory') {
       const file = url.searchParams.get('file') || 'MEMORY.md'
+      
+      // Validate file path
+      if (file.includes('..') || file.includes('/')) {
+        jsonResponse(res, 400, { error: 'Invalid file path' })
+        return
+      }
+      
       const content = await readFileSafe(path.join(MEMORY_DIR, file))
       if (!content.trim()) {
         jsonResponse(res, 404, { error: `File not found: ${file}` })
@@ -164,6 +231,26 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
       if (!content || typeof content !== 'string') {
         jsonResponse(res, 400, { error: 'Content is required' })
+        return
+      }
+
+      // Validate file path
+      if (String(file).includes('..') || String(file).includes('/')) {
+        jsonResponse(res, 400, { error: 'Invalid file path' })
+        return
+      }
+
+      // Validate type if provided
+      const validTypes = ['architecture', 'decision', 'convention', 'learning', 'note', 'fix', 'feature']
+      if (type && !validTypes.includes(String(type))) {
+        jsonResponse(res, 400, { error: `Invalid type. Must be one of: ${validTypes.join(', ')}` })
+        return
+      }
+
+      // Validate importance if provided
+      const validImportance = ['low', 'medium', 'high']
+      if (importance && !validImportance.includes(String(importance))) {
+        jsonResponse(res, 400, { error: `Invalid importance. Must be one of: ${validImportance.join(', ')}` })
         return
       }
 
@@ -298,6 +385,8 @@ const server = http.createServer(handleRequest)
 server.listen(PORT, () => {
   console.log(`Memory API Server running at http://localhost:${PORT}`)
   console.log(`API Key: ${API_KEY ? 'Enabled' : 'Disabled'}`)
+  console.log(`CORS Origin: ${CORS_ORIGIN}`)
+  console.log(`Rate Limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`)
   console.log(`Memory dir: ${MEMORY_DIR}`)
 })
 

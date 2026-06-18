@@ -1,6 +1,7 @@
 import { tool } from '@opencode-ai/plugin'
 import fs from 'fs/promises'
 import path from 'path'
+import { readFileSafe, writeFileSafe, generateId } from './memory-utils'
 
 const MEMORY_DIR = process.env.MEMORY_DIR || '.opencode/memory'
 const LEARNING_FILE = path.join(MEMORY_DIR, 'learnings.md')
@@ -35,24 +36,6 @@ interface Learning {
   content: string
   context?: string
   tags: string[]
-}
-
-// File helpers
-async function readFileSafe(filePath: string): Promise<string> {
-  try {
-    return await fs.readFile(filePath, 'utf-8')
-  } catch {
-    return ''
-  }
-}
-
-async function writeFileSafe(filePath: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, content, 'utf-8')
-}
-
-function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
 }
 
 // Parse corrections from file
