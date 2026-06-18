@@ -430,7 +430,7 @@ curl http://localhost:3000/api/memory/stats
 
 OpenCode Memory Lite is designed to be **simple, lightweight, and portable**. Here's how it compares to other memory systems:
 
-| Feature | OpenCode Memory | Engram | Mem0 | Zep |
+| Feature | OpenCode Memory Lite | Engram | Mem0 | Zep |
 |---------|-----------------|--------|------|-----|
 | Language | TypeScript | Go | Python | Go / Python |
 | Storage | Markdown files | SQLite + FTS5 | Vector DB | PostgreSQL |
