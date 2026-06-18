@@ -432,15 +432,15 @@ OpenCode Memory Lite is designed to be **simple, lightweight, and portable**. He
 
 | Feature | OpenCode Memory | Engram | Mem0 | Zep |
 |---------|-----------------|--------|------|-----|
-| Language | TypeScript | Go | Python | Python |
+| Language | TypeScript | Go | Python | Go / Python |
 | Storage | Markdown files | SQLite + FTS5 | Vector DB | PostgreSQL |
 | Dependencies | 1 package | Go binary | Many | Many |
-| Setup | Clone + npm install | Brew install | Docker | Docker |
+| Setup | Clone + npm install | Brew install | pip / Docker | Docker |
 | Size | ~100KB | ~10MB | ~100MB | ~200MB |
 | Tools | 24 | 20+ | Many | Many |
 | Human-readable | Yes | No | No | No |
 | Portable | Yes | No | No | No |
-| Relevance scoring | Yes (TF-IDF) | No | Vector | No |
+| Relevance scoring | Yes (TF-IDF) | Yes (BM25) | Yes (Vector) | Yes (Hybrid) |
 
 ### Strengths
 
