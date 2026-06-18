@@ -273,6 +273,156 @@ describe('Token Estimation', () => {
   })
 })
 
+describe('TF-IDF Scoring', () => {
+  it('should calculate term frequency correctly', () => {
+    function calculateTF(text: string, term: string): number {
+      const words = text.toLowerCase().split(/\s+/)
+      const termCount = words.filter(w => w === term).length
+      return words.length > 0 ? termCount / words.length : 0
+    }
+
+    expect(calculateTF('hello world hello', 'hello')).toBe(2/3)
+    expect(calculateTF('hello world test', 'hello')).toBe(1/3)
+    expect(calculateTF('hello world test', 'missing')).toBe(0)
+  })
+
+  it('should calculate IDF correctly', () => {
+    function computeIDF(term: string, documentCount: Map<string, number>, totalDocs: number): number {
+      const docFreq = documentCount.get(term) || 0
+      if (docFreq === 0) return 0
+      return Math.log((totalDocs + 1) / (docFreq + 1)) + 1
+    }
+
+    const docCount = new Map([['memory', 5], ['rare', 1]])
+    const totalDocs = 10
+
+    // Common term (memory) - lower IDF
+    const memoryIDF = computeIDF('memory', docCount, totalDocs)
+    // Rare term - higher IDF
+    const rareIDF = computeIDF('rare', docCount, totalDocs)
+
+    expect(memoryIDF).toBeLessThan(rareIDF)
+    expect(rareIDF).toBeGreaterThan(1)
+  })
+})
+
+describe('Proximity Scoring', () => {
+  it('should give higher score for closer terms', () => {
+    function calculateProximity(text: string, terms: string[]): number {
+      if (terms.length < 2) return 0
+
+      const lowerText = text.toLowerCase()
+      const positions: number[][] = terms.map(t => {
+        const pos: number[] = []
+        let idx = lowerText.indexOf(t)
+        while (idx !== -1) {
+          pos.push(idx)
+          idx = lowerText.indexOf(t, idx + 1)
+        }
+        return pos
+      })
+
+      let minDistance = Infinity
+      for (let i = 0; i < positions[0].length; i++) {
+        for (let j = 1; j < positions.length; j++) {
+          for (const pos2 of positions[j]) {
+            const dist = Math.abs(positions[0][i] - pos2)
+            if (dist < minDistance) minDistance = dist
+          }
+        }
+      }
+
+      if (minDistance === Infinity) return 0
+      if (minDistance < 20) return 30
+      if (minDistance < 50) return 20
+      if (minDistance < 100) return 10
+      return 5
+    }
+
+    // Close terms - high score
+    expect(calculateProximity('memory search engine', ['memory', 'search'])).toBe(30)
+    // Medium distance - medium score
+    expect(calculateProximity('memory is very important for search', ['memory', 'search'])).toBe(20)
+    // Far terms - still medium (distance < 50)
+    expect(calculateProximity('memory is very important for the search functionality', ['memory', 'search'])).toBe(20)
+    // Very far terms - low score (distance > 50)
+    expect(calculateProximity('memory is a very very very important concept for the search algorithm', ['memory', 'search'])).toBe(10)
+  })
+})
+
+describe('Heading Match Bonus', () => {
+  it('should give bonus for heading matches', () => {
+    function calculateHeadingBonus(heading: string, query: string): number {
+      const lowerHeading = heading.toLowerCase()
+      const lowerQuery = query.toLowerCase()
+
+      if (lowerHeading.includes(lowerQuery)) return 40
+      if (lowerQuery.includes(lowerHeading)) return 30
+
+      const headingWords = lowerHeading.split(/\s+/)
+      const queryWords = lowerQuery.split(/\s+/)
+      const commonWords = headingWords.filter(w => queryWords.includes(w) && w.length > 2)
+      return commonWords.length * 10
+    }
+
+    // Exact heading match
+    expect(calculateHeadingBonus('Memory System', 'memory system')).toBe(40)
+    // Query contains heading
+    expect(calculateHeadingBonus('Memory', 'memory system architecture')).toBe(30)
+    // Partial word match (heading contains query)
+    expect(calculateHeadingBonus('Memory Search', 'search')).toBe(40)
+    // Partial word match (query contains heading word)
+    expect(calculateHeadingBonus('Memory', 'search for memory')).toBe(30)
+    // No match
+    expect(calculateHeadingBonus('Task Management', 'memory')).toBe(0)
+  })
+})
+
+describe('Exact Phrase Bonus', () => {
+  it('should give bonus for exact phrase matches', () => {
+    function calculateExactPhraseBonus(text: string, query: string): number {
+      const lowerText = text.toLowerCase()
+      const lowerQuery = query.toLowerCase().trim()
+
+      if (lowerText.includes(lowerQuery)) {
+        const idx = lowerText.indexOf(lowerQuery)
+        return idx < 50 ? 50 : 30
+      }
+      return 0
+    }
+
+    // Exact phrase at beginning
+    expect(calculateExactPhraseBonus('memory search engine', 'memory search')).toBe(50)
+    // Exact phrase later in text (position 4, still < 50)
+    expect(calculateExactPhraseBonus('the memory search is working', 'memory search')).toBe(50)
+    // No exact phrase
+    expect(calculateExactPhraseBonus('memory and search', 'memory search')).toBe(0)
+  })
+})
+
+describe('Tag Bonus', () => {
+  it('should give bonus for tag matches', () => {
+    function calculateTagBonus(tags: string[], terms: string[]): number {
+      let bonus = 0
+      for (const term of terms) {
+        for (const tag of tags) {
+          if (tag.toLowerCase().includes(term)) bonus += 15
+        }
+      }
+      return Math.min(bonus, 45)
+    }
+
+    // Single tag match
+    expect(calculateTagBonus(['architecture', 'decision'], ['architecture'])).toBe(15)
+    // Multiple tag matches
+    expect(calculateTagBonus(['architecture', 'decision'], ['architecture', 'decision'])).toBe(30)
+    // Tag match capped at 45
+    expect(calculateTagBonus(['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd'])).toBe(45)
+    // No tag match
+    expect(calculateTagBonus(['architecture'], ['missing'])).toBe(0)
+  })
+})
+
 describe('Metadata Boost Calculation', () => {
   it('should boost high importance entries', () => {
     function calculateMetadataBoost(importance: string, ageDays: number): number {

@@ -169,6 +169,35 @@ Result: Auto-tags with `backend, database`
 memory_search query="flutter" type="feature" tags="mobile"
 ```
 
+### Search with relevance scoring
+
+```
+memory_search query="flutter architecture" relevance_details=true
+```
+
+Result includes scoring breakdown:
+```
+1. [MEMORY.md] [architecture|high|flutter,mobile] (score: 85.2)
+Flutter Architecture
+
+  Scoring Breakdown:
+  - TF-IDF: 42.5
+  - Proximity: 30
+  - Heading: 40
+  - Exact Phrase: 0
+  - Tag: 15
+  - Metadata: 20
+  - Total: 147.5
+```
+
+**Scoring Factors:**
+- **TF-IDF** - Term Frequency × Inverse Document Frequency (rare terms score higher)
+- **Proximity** - Bonus when search terms appear close together
+- **Heading Match** - Bonus when query matches section heading
+- **Exact Phrase** - Bonus for exact phrase matches
+- **Tag Match** - Bonus when query matches metadata tags
+- **Metadata Boost** - Importance (+20 high, +10 medium) and recency (+15 recent, -5 old)
+
 ### Check conflicts
 
 ```
@@ -407,9 +436,10 @@ OpenCode Memory is designed to be **simple, lightweight, and portable**. Here's 
 | Dependencies | 1 package | Go binary | Many | Many |
 | Setup | Clone + npm install | Brew install | Docker | Docker |
 | Size | ~100KB | ~10MB | ~100MB | ~200MB |
-| Tools | 17 | 20+ | Many | Many |
+| Tools | 22 | 20+ | Many | Many |
 | Human-readable | Yes | No | No | No |
 | Portable | Yes | No | No | No |
+| Relevance scoring | Yes (TF-IDF) | No | Vector | No |
 
 ### Strengths
 
@@ -418,12 +448,14 @@ OpenCode Memory is designed to be **simple, lightweight, and portable**. Here's 
 - **Portable** - Copy folder and done
 - **Simple** - No database, vector, or Docker required
 - **Auto-detect** - Tags, duplicates, conflicts automatically
+- **Relevance scoring** - TF-IDF, proximity, heading match, exact phrase, tag match
+- **Self-improvement** - Auto-learns from corrections, extracts patterns
 
 ### Limitations
 
-- **Search** - Grep-based, not as fast as SQLite FTS5
+- **Search** - Grep-based with TF-IDF scoring, not as fast as SQLite FTS5
 - **Scale** - Cannot handle thousands of entries
-- **Vector search** - No semantic search
+- **Vector search** - No semantic search (but TF-IDF + proximity scoring helps)
 
 ### When to use what?
 

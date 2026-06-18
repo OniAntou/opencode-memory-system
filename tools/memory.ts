@@ -109,6 +109,97 @@ interface SearchResult {
   content: string
   score: number
   metadata: MemoryMetadata | null
+  scoring_breakdown?: ScoringBreakdown
+}
+
+interface ScoringBreakdown {
+  tfidf_score: number
+  proximity_score: number
+  heading_bonus: number
+  exact_phrase_bonus: number
+  tag_bonus: number
+  metadata_boost: number
+  total: number
+}
+
+// IDF cache - computed once per search
+const idfCache = new Map<string, number>()
+
+function computeIDF(term: string, documentCount: Map<string, number>, totalDocs: number): number {
+  const docFreq = documentCount.get(term) || 0
+  if (docFreq === 0) return 0
+  return Math.log((totalDocs + 1) / (docFreq + 1)) + 1
+}
+
+function calculateTF(text: string, term: string): number {
+  const words = text.toLowerCase().split(/\s+/)
+  const termCount = words.filter(w => w === term).length
+  return words.length > 0 ? termCount / words.length : 0
+}
+
+function calculateProximity(text: string, terms: string[]): number {
+  if (terms.length < 2) return 0
+
+  const lowerText = text.toLowerCase()
+  const positions: number[][] = terms.map(t => {
+    const pos: number[] = []
+    let idx = lowerText.indexOf(t)
+    while (idx !== -1) {
+      pos.push(idx)
+      idx = lowerText.indexOf(t, idx + 1)
+    }
+    return pos
+  })
+
+  let minDistance = Infinity
+  for (let i = 0; i < positions[0].length; i++) {
+    for (let j = 1; j < positions.length; j++) {
+      for (const pos2 of positions[j]) {
+        const dist = Math.abs(positions[0][i] - pos2)
+        if (dist < minDistance) minDistance = dist
+      }
+    }
+  }
+
+  if (minDistance === Infinity) return 0
+  if (minDistance < 20) return 30
+  if (minDistance < 50) return 20
+  if (minDistance < 100) return 10
+  return 5
+}
+
+function calculateHeadingBonus(heading: string, query: string): number {
+  const lowerHeading = heading.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+
+  if (lowerHeading.includes(lowerQuery)) return 40
+  if (lowerQuery.includes(lowerHeading)) return 30
+
+  const headingWords = lowerHeading.split(/\s+/)
+  const queryWords = lowerQuery.split(/\s+/)
+  const commonWords = headingWords.filter(w => queryWords.includes(w) && w.length > 2)
+  return commonWords.length * 10
+}
+
+function calculateExactPhraseBonus(text: string, query: string): number {
+  const lowerText = text.toLowerCase()
+  const lowerQuery = query.toLowerCase().trim()
+
+  if (lowerText.includes(lowerQuery)) {
+    const idx = lowerText.indexOf(lowerQuery)
+    return idx < 50 ? 50 : 30
+  }
+  return 0
+}
+
+function calculateTagBonus(tags: string[], terms: string[]): number {
+  let bonus = 0
+  for (const term of terms) {
+    for (const tag of tags) {
+      if (tag.toLowerCase().includes(term)) bonus += 15
+    }
+  }
+  return Math.min(bonus, 45)
 }
 
 function calculateMetadataBoost(meta: MemoryMetadata | null): number {
@@ -127,11 +218,43 @@ function calculateMetadataBoost(meta: MemoryMetadata | null): number {
 
 async function searchMemoryFiles(
   query: string,
-  filters?: { type?: string; tags?: string[]; after?: string; before?: string }
+  filters?: { type?: string; tags?: string[]; after?: string; before?: string },
+  relevanceDetails?: boolean
 ): Promise<SearchResult[]> {
   const results: SearchResult[] = []
   const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2)
 
+  // First pass: collect all documents for IDF computation
+  const documentCount = new Map<string, number>()
+  let totalDocs = 0
+
+  async function walkForIDF(dir: string) {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walkForIDF(fullPath)
+        } else if (entry.isFile() && entry.name.endsWith(".md")) {
+          totalDocs++
+          const content = await fs.readFile(fullPath, "utf-8")
+          const sections = parseSections(content)
+          for (const section of sections) {
+            const searchText = (section.heading + " " + section.content).toLowerCase()
+            for (const term of terms) {
+              if (searchText.includes(term)) {
+                documentCount.set(term, (documentCount.get(term) || 0) + 1)
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  await walkForIDF(MEMORY_DIR)
+
+  // Second pass: score each section
   async function walkDir(dir: string) {
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true })
@@ -157,27 +280,52 @@ async function searchMemoryFiles(
             }
 
             const searchText = (section.heading + " " + section.content).toLowerCase()
-            let totalScore = 0
             let allMatched = true
 
+            // Check all terms match
             for (const term of terms) {
-              const { matched, score } = fuzzyMatch(term, searchText)
-              if (matched) {
-                totalScore += score
-              } else {
+              const { matched } = fuzzyMatch(term, searchText)
+              if (!matched) {
                 allMatched = false
                 break
               }
             }
 
             if (allMatched && terms.length > 0) {
-              totalScore += calculateMetadataBoost(section.metadata)
+              // Calculate TF-IDF score
+              let tfidfScore = 0
+              for (const term of terms) {
+                const tf = calculateTF(searchText, term)
+                const idf = computeIDF(term, documentCount, totalDocs)
+                tfidfScore += tf * idf * 100
+              }
+
+              // Calculate other scores
+              const proximityScore = calculateProximity(searchText, terms)
+              const headingBonus = calculateHeadingBonus(section.heading, query)
+              const exactPhraseBonus = calculateExactPhraseBonus(searchText, query)
+              const tagBonus = section.metadata ? calculateTagBonus(section.metadata.tags, terms) : 0
+              const metadataBoost = calculateMetadataBoost(section.metadata)
+
+              const total = tfidfScore + proximityScore + headingBonus + exactPhraseBonus + tagBonus + metadataBoost
+
+              const breakdown: ScoringBreakdown = {
+                tfidf_score: Math.round(tfidfScore * 100) / 100,
+                proximity_score: proximityScore,
+                heading_bonus: headingBonus,
+                exact_phrase_bonus: exactPhraseBonus,
+                tag_bonus: tagBonus,
+                metadata_boost: metadataBoost,
+                total: Math.round(total * 100) / 100,
+              }
+
               results.push({
                 file: path.relative(MEMORY_DIR, fullPath),
                 line: 0,
                 content: section.heading + "\n" + section.content.trim().slice(0, 200),
-                score: totalScore,
+                score: total,
                 metadata: section.metadata,
+                ...(relevanceDetails ? { scoring_breakdown: breakdown } : {}),
               })
             }
           }
@@ -310,13 +458,14 @@ Auto-detect: tags suggested, duplicates and conflicts checked.`,
 })
 
 export const memory_search = tool({
-  description: "Search across all memory files with optional filters. Returns sections with metadata.",
+  description: "Search across all memory files with optional filters. Returns sections with metadata and relevance scores.",
   args: {
     query: tool.schema.string().describe("Search query (space-separated keywords)"),
     type: tool.schema.string().optional().describe("Filter by type (architecture, decision, convention, learning, note, fix, feature)"),
     tags: tool.schema.string().optional().describe("Filter by comma-separated tags"),
     after: tool.schema.string().optional().describe("Filter by date (YYYY-MM-DD), only show entries updated after this date"),
     before: tool.schema.string().optional().describe("Filter by date (YYYY-MM-DD), only show entries updated before this date"),
+    relevance_details: tool.schema.boolean().optional().describe("Show detailed scoring breakdown (TF-IDF, proximity, heading, exact phrase, tag, metadata)"),
   },
   async execute(args) {
     const filters = {
@@ -325,10 +474,9 @@ export const memory_search = tool({
       after: args.after,
       before: args.before,
     }
-    const results = await searchMemoryFiles(args.query, filters)
+    const results = await searchMemoryFiles(args.query, filters, args.relevance_details)
 
     // Record search history
-    const historyFile = path.join(MEMORY_DIR, "search-history.json")
     try {
       const raw = await readMemoryFile("search-history.json")
       const history = raw.trim() ? JSON.parse(raw) : []
@@ -337,9 +485,15 @@ export const memory_search = tool({
     } catch {}
 
     if (results.length === 0) return "No results found."
-    return results.map(r => {
+    return results.map((r, i) => {
       const meta = r.metadata ? ` [${r.metadata.type}|${r.metadata.importance}|${r.metadata.tags.join(",")}]` : ""
-      return `[${r.file}]${meta}\n${r.content}`
+      const rank = `${i + 1}. `
+      let output = `${rank}[${r.file}]${meta} (score: ${r.score})\n${r.content}`
+      if (r.scoring_breakdown) {
+        const b = r.scoring_breakdown
+        output += `\n\n  Scoring Breakdown:\n  - TF-IDF: ${b.tfidf_score}\n  - Proximity: ${b.proximity_score}\n  - Heading: ${b.heading_bonus}\n  - Exact Phrase: ${b.exact_phrase_bonus}\n  - Tag: ${b.tag_bonus}\n  - Metadata: ${b.metadata_boost}\n  - Total: ${b.total}`
+      }
+      return output
     }).join("\n\n")
   },
 })
