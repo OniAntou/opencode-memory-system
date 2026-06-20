@@ -418,105 +418,112 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
       }
 
       // Auto-learn from edit operations (user correcting code)
-      if (toolName === "edit") {
+      if (["edit", "replace_file_content", "multi_replace_file_content"].includes(toolName)) {
         const args = input.args as Record<string, unknown>
-        const filePath = String(args.filePath || args.file || "")
-        const oldString = String(args.oldString || "")
-        const newString = String(args.newString || "")
+        const filePath = String(args.filePath || args.file || args.TargetFile || "")
+        
+        let wrong = String(args.oldString || args.TargetContent || "")
+        let correct = String(args.newString || args.ReplacementContent || "")
+        
+        if (!wrong && !correct && Array.isArray(args.ReplacementChunks) && args.ReplacementChunks.length > 0) {
+          wrong = String(args.ReplacementChunks[0].TargetContent || "")
+          correct = String(args.ReplacementChunks[0].ReplacementContent || "")
+        }
 
-        if (oldString && newString && oldString !== newString) {
-          // This is a correction - save it
-          const correctionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
-          const timestamp = new Date().toISOString()
-
-          const correction = {
-            id: correctionId,
-            timestamp,
-            context: `File: ${filePath}`,
-            wrong: oldString.slice(0, 200),
-            correct: newString.slice(0, 200),
-            category: "code",
-            tags: suggestTags(newString),
-          }
-
-          // Append to corrections file
+        if (wrong && correct && wrong !== correct) {
           const correctionsFile = "corrections.md"
           const existing = await readMemoryFile(correctionsFile)
-          const lines = existing.trim() ? existing.split("\n") : ["# Corrections", ""]
+          
+          // Deduplication check
+          const signature = correct.slice(0, 100).trim()
+          let isDuplicate = false;
+          if (signature.length > 20 && existing.includes(signature)) {
+            isDuplicate = true;
+          }
 
-          lines.push(`## [${correctionId}]`)
-          lines.push(`<!-- timestamp: ${timestamp} | category: code | tags: ${correction.tags.join(", ")} -->`)
-          lines.push(`**Context**: ${correction.context}`)
-          lines.push(`**Wrong**: ${correction.wrong}`)
-          lines.push(`**Correct**: ${correction.correct}`)
-          lines.push("")
+          if (!isDuplicate) {
+            const correctionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+            const timestamp = new Date().toISOString()
+            const tags = suggestTags(correct)
+            const contextInfo = currentTaskId ? `Task: ${currentTaskId} | File: ${filePath}` : `File: ${filePath}`
 
-          await writeMemoryFile(correctionsFile, lines.join("\n"))
+            const lines = existing.trim() ? existing.split("\n") : ["# Corrections", ""]
+            lines.push(`## [${correctionId}]`)
+            lines.push(`<!-- timestamp: ${timestamp} | category: code | count: 1 | tags: ${tags.join(", ")} -->`)
+            lines.push(`**Context**: ${contextInfo}`)
+            lines.push(`**Wrong**: ${wrong.slice(0, 200)}`)
+            lines.push(`**Correct**: ${correct.slice(0, 200)}`)
+            lines.push("")
 
-          await client.app.log({
-            body: {
-              service: "memory-plugin",
-              level: "info",
-              message: `Auto-learned correction from edit in ${filePath}`,
-            },
-          })
+            await writeMemoryFile(correctionsFile, lines.join("\n"))
+
+            await client.app.log({
+              body: {
+                service: "memory-plugin",
+                level: "info",
+                message: `Auto-learned correction from ${toolName} in ${filePath}`,
+              },
+            })
+          }
         }
       }
 
       // Auto-learn from write operations (new patterns)
-      if (toolName === "write") {
+      if (["write", "write_to_file"].includes(toolName)) {
         const args = input.args as Record<string, unknown>
-        const filePath = String(args.filePath || args.file || "")
-        const content = String(args.content || "")
+        const filePath = String(args.filePath || args.file || args.TargetFile || "")
+        const content = String(args.content || args.CodeContent || "")
 
-        // Extract patterns from new files
         if (content.length > 100) {
           const skipExts = ['.json', '.lock', '.log', '.test.ts', '.spec.ts', '.d.ts', '.map', '.config.ts', '.config.js']
           const skipDirs = ['node_modules', 'dist', '.git', 'coverage']
           
-          if (skipExts.some(ext => filePath.endsWith(ext))) return
-          if (skipDirs.some(dir => filePath.includes(`/${dir}/`) || filePath.includes(`\\${dir}\\`) || filePath.startsWith(`${dir}/`) || filePath.startsWith(`${dir}\\`))) return
+          let shouldSkip = false;
+          if (skipExts.some(ext => filePath.endsWith(ext))) shouldSkip = true;
+          if (skipDirs.some(dir => filePath.includes(`/${dir}/`) || filePath.includes(`\\${dir}\\`) || filePath.startsWith(`${dir}/`) || filePath.startsWith(`${dir}\\`))) shouldSkip = true;
           
-          const tags = suggestTags(content)
-          if (tags.length > 0) {
-            // Save as pattern
-            const patternId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
-            const pattern = {
-              id: patternId,
-              name: `Pattern from ${path.basename(filePath)}`,
-              description: `Auto-detected pattern from ${filePath}`,
-              example: content.slice(0, 500),
-              count: 1,
-              lastUsed: new Date().toISOString(),
-              tags,
-            }
-
+          if (!shouldSkip) {
             const patternsFile = "patterns.md"
             const existing = await readMemoryFile(patternsFile)
-            const lines = existing.trim() ? existing.split("\n") : ["# Patterns", ""]
+            
+            // Deduplication
+            const signature = content.slice(0, 150).trim()
+            let isDuplicate = false;
+            if (signature.length > 30 && existing.includes(signature)) {
+               isDuplicate = true;
+            }
 
-            lines.push(`## [${patternId}]`)
-            lines.push(`<!-- name: ${pattern.name} | count: 1 | lastUsed: ${new Date().toISOString()} | tags: ${pattern.tags.join(", ")} -->`)
-            lines.push(`**Description**: ${pattern.description}`)
-            lines.push(`**Example**: ${pattern.example.slice(0, 200)}...`)
-            lines.push("")
+            if (!isDuplicate) {
+              const tags = suggestTags(content)
+              if (tags.length > 0) {
+                const patternId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+                const lines = existing.trim() ? existing.split("\n") : ["# Patterns", ""]
 
-            await writeMemoryFile(patternsFile, lines.join("\n"))
+                lines.push(`## [${patternId}]`)
+                lines.push(`<!-- name: Pattern from ${path.basename(filePath)} | count: 1 | lastUsed: ${new Date().toISOString()} | tags: ${tags.join(", ")} -->`)
+                lines.push(`**Description**: Auto-detected pattern from ${filePath}`)
+                if (currentTaskId) lines.push(`**Task**: ${currentTaskId}`)
+                lines.push(`**Example**: ${content.slice(0, 200)}...`)
+                lines.push("")
+
+                await writeMemoryFile(patternsFile, lines.join("\n"))
+              }
+            }
           }
         }
       }
 
-      if (["bash", "edit", "write"].includes(toolName)) {
+      if (["bash", "run_command", "edit", "replace_file_content", "multi_replace_file_content", "write", "write_to_file"].includes(toolName)) {
         if (currentTaskId) {
           const args = input.args as Record<string, unknown>
           let details = ""
 
-          if (toolName === "bash") {
-            details = `Command: ${String(args.command).slice(0, 100)}`
-          } else if (toolName === "edit") {
-            details = `Edited: ${String(args.filePath || args.file)}`
-          } else if (toolName === "write") {
-            details = `Wrote: ${String(args.filePath || args.file)}`
+          if (["bash", "run_command"].includes(toolName)) {
+            details = `Command: ${String(args.command || args.CommandLine).slice(0, 100)}`
+          } else if (["edit", "replace_file_content", "multi_replace_file_content"].includes(toolName)) {
+            details = `Edited: ${String(args.filePath || args.file || args.TargetFile)}`
+          } else if (["write", "write_to_file"].includes(toolName)) {
+            details = `Wrote: ${String(args.filePath || args.file || args.TargetFile)}`
           }
 
           await saveTaskProgress(currentTaskId, toolName, details)
