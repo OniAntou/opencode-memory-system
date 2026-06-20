@@ -1,7 +1,10 @@
 import http from 'http'
 import path from 'path'
 import { URL } from 'url'
-import { parseMetadata, parseSections, metadataToComment, readFileSafe, writeFileSafe, rebuildMemoryFile, type MemoryMetadata, type ParsedSection } from '../tools/memory-utils'
+import { parseMetadata, parseSections, metadataToComment, type MemoryMetadata, type ParsedSection } from '../tools/memory-utils'
+import { readMemoryFile, writeMemoryFile } from '../tools/memory-io'
+import { searchMemoryFiles } from '../tools/memory-search'
+import { validateMemoryFile, collectMemoryStats } from '../tools/memory-analytics'
 
 const MEMORY_DIR = process.env.MEMORY_DIR || '.opencode/memory'
 const PORT = parseInt(process.env.PORT || '3000', 10)
@@ -144,7 +147,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         return
       }
       
-      const content = await readFileSafe(path.join(MEMORY_DIR, file))
+      const content = await readMemoryFile(file)
       if (!content.trim()) {
         jsonResponse(res, 404, { error: `File not found: ${file}` })
         return
@@ -155,7 +158,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /api/memory/sections - Get parsed sections
     if (method === 'GET' && pathname === '/api/memory/sections') {
-      const content = await readFileSafe(path.join(MEMORY_DIR, 'MEMORY.md'))
+      const content = await readMemoryFile('MEMORY.md')
       const sections = parseSections(content)
       jsonResponse(res, 200, { sections })
       return
@@ -201,7 +204,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         const metaComment = metadataToComment(meta)
         const fullContent = `${metaComment}\n${content}`
 
-        const existing = await readFileSafe(path.join(MEMORY_DIR, String(file)))
+        const existing = await readMemoryFile(String(file))
         const sections = parseSections(existing)
         const newSection: ParsedSection = {
           heading: `## ${String(type).charAt(0).toUpperCase()}${String(type).slice(1)}`,
@@ -209,12 +212,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           content: String(content),
         }
         sections.push(newSection)
-        await writeFileSafe(path.join(MEMORY_DIR, String(file)), rebuildMemoryFile(sections))
+        
+        const { rebuildMemoryFile } = await import('../tools/memory-utils')
+        await writeMemoryFile(String(file), rebuildMemoryFile(sections))
         jsonResponse(res, 200, { success: true, message: `Written with metadata (type: ${type})` })
       } else {
-        const existing = await readFileSafe(path.join(MEMORY_DIR, String(file)))
+        const existing = await readMemoryFile(String(file))
         const separator = existing.trim() ? '\n\n' : ''
-        await writeFileSafe(path.join(MEMORY_DIR, String(file)), existing + separator + String(content))
+        await writeMemoryFile(String(file), existing + separator + String(content))
         jsonResponse(res, 200, { success: true, message: `Written to ${file}` })
       }
       return
@@ -231,20 +236,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         return
       }
 
-      const content = await readFileSafe(path.join(MEMORY_DIR, 'MEMORY.md'))
-      const sections = parseSections(content)
-      const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2)
-
-      const results = sections.filter(section => {
-        if (type && section.metadata?.type !== type) return false
-        if (tags && section.metadata) {
-          const filterTags = tags.split(',').map(t => t.trim())
-          if (!filterTags.some(t => section.metadata!.tags.includes(t))) return false
-        }
-
-        const searchText = (section.heading + ' ' + section.content).toLowerCase()
-        return terms.every(term => searchText.includes(term))
-      })
+      const results = await searchMemoryFiles(query, { type: type || undefined, tags: tags ? tags.split(',').map(t=>t.trim()) : undefined })
 
       jsonResponse(res, 200, { query, results })
       return
@@ -252,54 +244,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /api/memory/stats - Get memory statistics
     if (method === 'GET' && pathname === '/api/memory/stats') {
-      const content = await readFileSafe(path.join(MEMORY_DIR, 'MEMORY.md'))
-      const sections = parseSections(content)
-
-      const stats = {
-        totalSections: sections.length,
-        byType: {} as Record<string, number>,
-        byImportance: {} as Record<string, number>,
-        tags: {} as Record<string, number>,
-      }
-
-      for (const section of sections) {
-        if (!section.metadata) continue
-        const meta = section.metadata
-        stats.byType[meta.type] = (stats.byType[meta.type] || 0) + 1
-        stats.byImportance[meta.importance] = (stats.byImportance[meta.importance] || 0) + 1
-        for (const tag of meta.tags) {
-          stats.tags[tag] = (stats.tags[tag] || 0) + 1
-        }
-      }
-
+      const stats = await collectMemoryStats()
       jsonResponse(res, 200, stats)
       return
     }
 
     // POST /api/memory/validate - Validate memory
     if (method === 'POST' && pathname === '/api/memory/validate') {
-      const content = await readFileSafe(path.join(MEMORY_DIR, 'MEMORY.md'))
-      const sections = parseSections(content)
-      const validTypes = ['architecture', 'decision', 'convention', 'learning', 'note', 'fix', 'feature']
-      const validImportance = ['low', 'medium', 'high']
-
-      const issues: { section: string; problems: string[] }[] = []
-
-      for (const section of sections) {
-        const problems: string[] = []
-        if (section.metadata) {
-          const meta = section.metadata
-          if (!validTypes.includes(meta.type)) problems.push(`Invalid type: ${meta.type}`)
-          if (!validImportance.includes(meta.importance)) problems.push(`Invalid importance: ${meta.importance}`)
-          if (meta.updated && isNaN(new Date(meta.updated).getTime())) problems.push(`Invalid date: ${meta.updated}`)
-          if (meta.tags.length === 0) problems.push('No tags defined')
-        } else {
-          problems.push('No metadata comment found')
-        }
-        if (section.content.trim().length === 0) problems.push('Empty section content')
-        if (problems.length > 0) issues.push({ section: section.heading, problems })
-      }
-
+      const issuesResult = await validateMemoryFile('MEMORY.md')
+      const issues = issuesResult.map(r => ({ section: r.section, problems: r.issues }))
       jsonResponse(res, 200, { valid: issues.length === 0, issues })
       return
     }

@@ -122,7 +122,8 @@ const searchCache = {
   documentCount: new Map<string, number>(),
   parsedSections: new Map<string, ParsedSection[]>(),
   totalDocs: 0,
-  isBuilt: false
+  isBuilt: false,
+  lastMtime: 0
 }
 
 onCacheInvalidated((filePath) => {
@@ -131,13 +132,22 @@ onCacheInvalidated((filePath) => {
   searchCache.documentCount.clear();
   searchCache.parsedSections.clear();
   searchCache.totalDocs = 0;
+  searchCache.lastMtime = 0;
 });
 
 async function buildSearchCache() {
-  if (searchCache.isBuilt) return;
+  let latestMtime = 0;
+  try {
+    const stat = await fs.stat(path.join(MEMORY_DIR, 'MEMORY.md'));
+    latestMtime = stat.mtimeMs;
+  } catch {}
+
+  if (searchCache.isBuilt && searchCache.lastMtime >= latestMtime && latestMtime > 0) return;
+  
   searchCache.documentCount.clear();
   searchCache.parsedSections.clear();
   searchCache.totalDocs = 0;
+  searchCache.lastMtime = latestMtime;
   
   async function walk(dir: string) {
     try {

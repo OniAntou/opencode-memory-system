@@ -1,9 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import fs from "fs/promises"
 import path from "path"
-import { getMemoryDir, readFileSafe, writeFileSafe, parseMetadata, parseSections, metadataToComment, extractTagsFromContent, type MemoryMetadata, type ParsedSection } from '../tools/memory-utils'
+import { parseMetadata, parseSections, metadataToComment, type MemoryMetadata, type ParsedSection } from '../tools/memory-utils'
+import { readMemoryFile, writeMemoryFile } from '../tools/memory-io'
+import { suggestTags } from '../tools/memory-analysis-utils'
+import { validateMemoryFile } from '../tools/memory-analytics'
 
-const MEMORY_DIR = getMemoryDir()
 const MAX_MEMORY_LINES = 300
 const ARCHIVE_DAYS = 7
 const NOTES_MAX_AGE_DAYS = 3
@@ -104,60 +106,11 @@ function rankMemorySection(section: string, type: "checkpoint" | "memory" | "not
   return score
 }
 
-function suggestTags(content: string, existingTags: string[] = []): string[] {
-  const lower = content.toLowerCase()
-  const suggested: Set<string> = new Set()
 
-  for (const [tag, keywords] of Object.entries(TAG_KEYWORDS)) {
-    if (existingTags.includes(tag)) continue
-    for (const keyword of keywords) {
-      if (lower.includes(keyword)) {
-        suggested.add(tag)
-        break
-      }
-    }
-  }
-
-  return Array.from(suggested)
-}
-
-async function validateMemoryFile(filePath: string): Promise<{ section: string; issues: string[] }[]> {
-  const results: { section: string; issues: string[] }[] = []
-  const content = await readFileSafe(path.join(MEMORY_DIR, filePath))
-  if (!content.trim()) return results
-
-  const sections = parseSections(content)
-  const validTypes = ["architecture", "decision", "convention", "learning", "note", "fix", "feature"]
-  const validImportance = ["low", "medium", "high"]
-
-  for (const section of sections) {
-    const issues: string[] = []
-
-    if (section.metadata) {
-      const meta = section.metadata
-      if (!validTypes.includes(meta.type)) issues.push(`Invalid type: "${meta.type}"`)
-      if (!validImportance.includes(meta.importance)) issues.push(`Invalid importance: "${meta.importance}"`)
-      if (meta.updated && isNaN(new Date(meta.updated).getTime())) issues.push(`Invalid date: "${meta.updated}"`)
-      if (meta.tags.length === 0) issues.push("No tags defined")
-    } else {
-      issues.push("No metadata comment found")
-    }
-
-    if (section.content.trim().length === 0) issues.push("Empty section content")
-
-    if (issues.length > 0) {
-      results.push({ section: section.heading, issues })
-    }
-  }
-
-  return results
-}
 
 async function saveTaskProgress(taskId: string, action: string, details: string): Promise<void> {
-  const taskDir = path.join(MEMORY_DIR, "tasks", taskId)
-  const progressFile = path.join(taskDir, "progress.md")
-
-  const existing = await readFileSafe(progressFile)
+  const relPath = path.join("tasks", taskId, "progress.md")
+  const existing = await readMemoryFile(relPath)
   const timestamp = getTimestamp()
 
   const entry = `\n### ${timestamp}\n- **Action**: ${action}\n- **Details**: ${details}\n`
@@ -166,21 +119,22 @@ async function saveTaskProgress(taskId: string, action: string, details: string)
     ? ""
     : `# Task Progress - ${taskId}\n\n## Created\n${timestamp}\n\n## Status\nin_progress\n`
 
-  await writeFileSafe(progressFile, header + existing + entry)
+  await writeMemoryFile(relPath, header + existing + entry)
 }
 
 async function getActiveTasks(): Promise<{ id: string; content: string; modified: Date }[]> {
   const tasks: { id: string; content: string; modified: Date }[] = []
-  const tasksDir = path.join(MEMORY_DIR, "tasks")
+  const tasksDir = path.join(process.cwd(), ".opencode/memory", "tasks")
 
   try {
     const entries = await fs.readdir(tasksDir, { withFileTypes: true })
     for (const entry of entries) {
       if (entry.isDirectory() && /^T[\d.]+$/.test(entry.name)) {
+        const relPath = path.join("tasks", entry.name, "progress.md")
         const progressFile = path.join(tasksDir, entry.name, "progress.md")
         const stat = await fs.stat(progressFile).catch(() => null)
         if (stat) {
-          const content = await readFileSafe(progressFile)
+          const content = await readMemoryFile(relPath)
           tasks.push({ id: entry.name, content, modified: stat.mtime })
         }
       }
@@ -191,13 +145,12 @@ async function getActiveTasks(): Promise<{ id: string; content: string; modified
 }
 
 async function getActiveTask(): Promise<string> {
-  const checkpoint = await readFileSafe(path.join(MEMORY_DIR, "checkpoint.md"))
+  const checkpoint = await readMemoryFile("checkpoint.md")
   const match = checkpoint.match(/## Active Task\n(.+?)(?:\n|$)/)
   return match ? match[1].trim() : "None"
 }
 
 async function saveCheckpoint(sessionID?: string): Promise<void> {
-  const checkpointPath = path.join(MEMORY_DIR, "checkpoint.md")
   const activeTask = await getActiveTask()
   const timestamp = getTimestamp()
 
@@ -216,16 +169,16 @@ ${sessionID || "unknown"}
 Auto-saved checkpoint. Use /dream to extract persistent knowledge.
 `
 
-  await writeFileSafe(checkpointPath, content)
+  await writeMemoryFile("checkpoint.md", content)
 }
 
 async function archiveOldSessions(): Promise<void> {
-  const archiveDir = path.join(MEMORY_DIR, "archive")
+  const archiveDir = "archive"
   const now = Date.now()
   const cutoffDays = ARCHIVE_DAYS * 24 * 60 * 60 * 1000
 
   try {
-    const checkpoint = await readFileSafe(path.join(MEMORY_DIR, "checkpoint.md"))
+    const checkpoint = await readMemoryFile("checkpoint.md")
     const lastUpdatedMatch = checkpoint.match(/## Last Updated\n(.+?)(?:\n|$)/)
     if (!lastUpdatedMatch) return
 
@@ -233,10 +186,10 @@ async function archiveOldSessions(): Promise<void> {
     if (now - lastUpdated > cutoffDays) {
       const date = new Date(lastUpdated)
       const monthDir = path.join(archiveDir, `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`)
-      await fs.mkdir(monthDir, { recursive: true })
+      // writeMemoryFile automatically creates directories if they don't exist
 
       const archiveFile = path.join(monthDir, `checkpoint-${date.toISOString().split("T")[0]}.md`)
-      await writeFileSafe(archiveFile, checkpoint)
+      await writeMemoryFile(archiveFile, checkpoint)
     }
   } catch {}
 }
@@ -247,7 +200,7 @@ async function checkMemorySize(): Promise<{ totalLines: number; totalChars: numb
   let totalChars = 0
 
   for (const file of files) {
-    const content = await readFileSafe(path.join(MEMORY_DIR, file))
+    const content = await readMemoryFile(file)
     totalLines += content.split("\n").length
     totalChars += content.length
   }
@@ -256,8 +209,7 @@ async function checkMemorySize(): Promise<{ totalLines: number; totalChars: numb
 }
 
 async function trimMemoryIfNeeded(): Promise<{ trimmed: boolean; linesRemoved: number }> {
-  const memoryPath = path.join(MEMORY_DIR, "MEMORY.md")
-  const content = await readFileSafe(memoryPath)
+  const content = await readMemoryFile("MEMORY.md")
   if (!content.trim()) return { trimmed: false, linesRemoved: 0 }
 
   const lines = content.split("\n")
@@ -282,21 +234,20 @@ async function trimMemoryIfNeeded(): Promise<{ trimmed: boolean; linesRemoved: n
     return `${s.heading}\n${metaComment}\n${s.content.trim()}`
   }).join("\n\n")
 
-  await writeFileSafe(memoryPath, "# Project Memory\n\n" + trimmed + "\n")
+  await writeMemoryFile("MEMORY.md", "# Project Memory\n\n" + trimmed + "\n")
 
   return { trimmed: true, linesRemoved: removedLines }
 }
 
 async function clearOldNotes(): Promise<{ cleared: boolean }> {
-  const notesPath = path.join(MEMORY_DIR, "notes.md")
-  const content = await readFileSafe(notesPath)
+  const content = await readMemoryFile("notes.md")
   if (!content.trim()) return { cleared: false }
 
   const dateMatch = content.match(/<!-- Last updated: (.+?) -->/)
   if (!dateMatch) {
     const now = new Date()
     const updated = `<!-- Last updated: ${now.toISOString()} -->\n${content}`
-    await writeFileSafe(notesPath, updated)
+    await writeMemoryFile("notes.md", updated)
     return { cleared: false }
   }
 
@@ -305,7 +256,7 @@ async function clearOldNotes(): Promise<{ cleared: boolean }> {
   const ageDays = (now - lastUpdated) / (1000 * 60 * 60 * 24)
 
   if (ageDays > NOTES_MAX_AGE_DAYS) {
-    await writeFileSafe(notesPath, `<!-- Last updated: ${new Date().toISOString()} -->\n<!-- Notes cleared: older than ${NOTES_MAX_AGE_DAYS} days -->\n`)
+    await writeMemoryFile("notes.md", `<!-- Last updated: ${new Date().toISOString()} -->\n<!-- Notes cleared: older than ${NOTES_MAX_AGE_DAYS} days -->\n`)
     return { cleared: true }
   }
 
@@ -319,9 +270,9 @@ interface RankedSection {
 }
 
 async function loadMemoryContentBudgeted(): Promise<string> {
-  const checkpointContent = await readFileSafe(path.join(MEMORY_DIR, "checkpoint.md"))
-  const memoryContent = await readFileSafe(path.join(MEMORY_DIR, "MEMORY.md"))
-  const notesContent = await readFileSafe(path.join(MEMORY_DIR, "notes.md"))
+  const checkpointContent = await readMemoryFile("checkpoint.md")
+  const memoryContent = await readMemoryFile("MEMORY.md")
+  const notesContent = await readMemoryFile("notes.md")
   const activeTasks = await getActiveTasks()
 
   const allSections: RankedSection[] = []
@@ -369,8 +320,8 @@ async function loadMemoryContentBudgeted(): Promise<string> {
 }
 
 async function reconstructContext(retainedMessages: string[]): Promise<string> {
-  const checkpointContent = await readFileSafe(path.join(MEMORY_DIR, "checkpoint.md"))
-  const memoryContent = await readFileSafe(path.join(MEMORY_DIR, "MEMORY.md"))
+  const checkpointContent = await readMemoryFile("checkpoint.md")
+  const memoryContent = await readMemoryFile("MEMORY.md")
   const activeTasks = await getActiveTasks()
 
   const parts: string[] = []
@@ -428,7 +379,7 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
       }
 
       if (currentTaskId) {
-        const taskProgress = await readFileSafe(path.join(MEMORY_DIR, "tasks", currentTaskId, "progress.md"))
+        const taskProgress = await readMemoryFile(path.join("tasks", currentTaskId, "progress.md"))
         if (taskProgress.trim()) {
           output.system.push(`## Current Task: ${currentTaskId}\n${truncateByChars(taskProgress, 500)}`)
         }
@@ -457,12 +408,12 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
         const args = input.args as Record<string, unknown>
         const query = String(args.query || "")
         const resultCount = typeof (output as any).result === "string" ? ((output as any).result.match(/\n/g)?.length || 0) : 0
-        const historyFile = path.join(MEMORY_DIR, "search-history.json")
+        const historyFile = path.join(process.cwd(), ".opencode/memory", "search-history.json")
         try {
-          const raw = await readFileSafe(historyFile)
+          const raw = await readMemoryFile("search-history.json")
           const history = raw.trim() ? JSON.parse(raw) : []
           history.push({ query: query.toLowerCase(), timestamp: new Date().toISOString(), resultCount })
-          await writeFileSafe(historyFile, JSON.stringify(history.slice(-50), null, 2))
+          await writeMemoryFile("search-history.json", JSON.stringify(history.slice(-50), null, 2))
         } catch {}
       }
 
@@ -485,12 +436,12 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
             wrong: oldString.slice(0, 200),
             correct: newString.slice(0, 200),
             category: "code",
-            tags: extractTagsFromContent(newString),
+            tags: suggestTags(newString),
           }
 
           // Append to corrections file
-          const correctionsFile = path.join(MEMORY_DIR, "corrections.md")
-          const existing = await readFileSafe(correctionsFile)
+          const correctionsFile = "corrections.md"
+          const existing = await readMemoryFile(correctionsFile)
           const lines = existing.trim() ? existing.split("\n") : ["# Corrections", ""]
 
           lines.push(`## [${correctionId}]`)
@@ -500,7 +451,7 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
           lines.push(`**Correct**: ${correction.correct}`)
           lines.push("")
 
-          await writeFileSafe(correctionsFile, lines.join("\n"))
+          await writeMemoryFile(correctionsFile, lines.join("\n"))
 
           await client.app.log({
             body: {
@@ -526,7 +477,7 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
           if (skipExts.some(ext => filePath.endsWith(ext))) return
           if (skipDirs.some(dir => filePath.includes(`/${dir}/`) || filePath.includes(`\\${dir}\\`) || filePath.startsWith(`${dir}/`) || filePath.startsWith(`${dir}\\`))) return
           
-          const tags = extractTagsFromContent(content)
+          const tags = suggestTags(content)
           if (tags.length > 0) {
             // Save as pattern
             const patternId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
@@ -540,8 +491,8 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
               tags,
             }
 
-            const patternsFile = path.join(MEMORY_DIR, "patterns.md")
-            const existing = await readFileSafe(patternsFile)
+            const patternsFile = "patterns.md"
+            const existing = await readMemoryFile(patternsFile)
             const lines = existing.trim() ? existing.split("\n") : ["# Patterns", ""]
 
             lines.push(`## [${patternId}]`)
@@ -550,7 +501,7 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
             lines.push(`**Example**: ${pattern.example.slice(0, 200)}...`)
             lines.push("")
 
-            await writeFileSafe(patternsFile, lines.join("\n"))
+            await writeMemoryFile(patternsFile, lines.join("\n"))
           }
         }
       }
@@ -633,7 +584,7 @@ export const MemoryPlugin: Plugin = async ({ project, client, directory, worktre
         }
 
         // Auto-check memory size and warn if large
-        const memoryContent = await readFileSafe(path.join(MEMORY_DIR, "MEMORY.md"))
+        const memoryContent = await readMemoryFile("MEMORY.md")
         if (memoryContent.length > 50000) {
           await client.app.log({
             body: {
